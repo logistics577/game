@@ -843,6 +843,9 @@ async function login(){
 
 async function logout(){
   if(!confirm('Log out?'))return;
+  wsRetryCount=WS_MAX_RETRIES;
+  if(wsRetryTimer){clearTimeout(wsRetryTimer);wsRetryTimer=null}
+  if(ws){ws.close(1000,'Logout');ws=null}
   try{await post('/api/logout',{session_token:sessionToken})}catch(_){}
   localStorage.removeItem(LS_TOKEN);
   localStorage.removeItem(LS_ROOM);
@@ -937,7 +940,9 @@ function enterRoom(room){
 
 async function leaveRoom(){
   if(!currentRoomId)return;
-  if(ws){ws.close();ws=null}
+  wsRetryCount=WS_MAX_RETRIES; // prevent auto-reconnect on intentional leave
+  if(wsRetryTimer){clearTimeout(wsRetryTimer);wsRetryTimer=null}
+  if(ws){ws.close(1000,'User left room');ws=null}
   currentRoomId=null;gameState=null;
   localStorage.removeItem(LS_ROOM);
   stopTimer();
@@ -1123,23 +1128,44 @@ async function acceptInvite(roomId,toast){
 // ════════════════════════════════════════════
 //  WEBSOCKET
 // ════════════════════════════════════════════
-function connectWS(roomId){
-  if(ws){ws.close()}
+let wsRetryCount=0;
+const WS_MAX_RETRIES=5;
+const WS_RETRY_DELAYS=[2000,4000,8000,16000,30000]; // exponential backoff
+let wsRetryTimer=null;
+
+function connectWS(roomId, isRetry=false){
+  // Clear any pending retry timer
+  if(wsRetryTimer){clearTimeout(wsRetryTimer);wsRetryTimer=null}
+  if(ws&&ws.readyState<=1){ws.close()} // close only if CONNECTING or OPEN
   const proto=location.protocol==='https:'?'wss':'ws';
   ws=new WebSocket(`${proto}://${location.host}/ws/${roomId}/${sessionToken}`);
-  ws.onopen=()=>{document.getElementById('connDot').classList.remove('offline')}
-  ws.onclose=()=>{
-    document.getElementById('connDot').classList.add('offline');
-    // Auto-reconnect after 3s if we're still in a room
-    if(currentRoomId){
-      setTimeout(()=>{
-        if(currentRoomId&&(!ws||ws.readyState>1)){
-          sysChat('Reconnecting...');connectWS(currentRoomId);
-        }
-      },3000);
-    }
+
+  ws.onopen=()=>{
+    document.getElementById('connDot').classList.remove('offline');
+    if(isRetry){sysChat('✅ Reconnected!')}
+    wsRetryCount=0; // reset on successful connect
   }
-  ws.onerror=()=>{}
+
+  ws.onclose=(evt)=>{
+    document.getElementById('connDot').classList.add('offline');
+    ws=null;
+    // Don't reconnect if: we intentionally left, game is over, or max retries hit
+    const gameOver=gameState&&gameState.status==='finished';
+    const intentionalClose=evt.code===1000||evt.code===4001||evt.code===4004;
+    if(!currentRoomId||gameOver||intentionalClose) return;
+    if(wsRetryCount>=WS_MAX_RETRIES){
+      sysChat('❌ Could not reconnect after '+WS_MAX_RETRIES+' attempts. Refresh the page.');
+      return;
+    }
+    const delay=WS_RETRY_DELAYS[wsRetryCount]||30000;
+    wsRetryCount++;
+    sysChat(`🔄 Connection lost. Reconnecting in ${delay/1000}s... (${wsRetryCount}/${WS_MAX_RETRIES})`);
+    wsRetryTimer=setTimeout(()=>{
+      if(currentRoomId) connectWS(currentRoomId, true);
+    }, delay);
+  }
+
+  ws.onerror=()=>{} // onclose handles it
   ws.onmessage=e=>{
     try{handleWsEvent(JSON.parse(e.data))}catch(_){}
   }
@@ -1854,7 +1880,6 @@ document.getElementById('ludoBoard').addEventListener('click',function(e){
     if(Math.sqrt((mx-x)**2+(my-y)**2)<CELL*.5){moveToken(i);return}
   }
 });
-
 
 // ════════════════════════════════════════════
 //  API
