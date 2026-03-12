@@ -301,7 +301,7 @@ app.add_middleware(
 # ─────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
-    with open("home.html", "r") as f:
+    with open("index.html", "r") as f:
         return HTMLResponse(content=f.read())
 
 
